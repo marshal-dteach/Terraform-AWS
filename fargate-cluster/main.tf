@@ -41,8 +41,8 @@ resource "aws_route" "internet_access" {
 # Create a NAT gateway with an EIP for each private subnet to get internet connectivity
 resource "aws_eip" "gw" {
   count      = "${var.az_count}"
-  vpc        = true
-  depends_on = ["aws_internet_gateway.gw"]
+  domain        = "vpc"
+  depends_on = [aws_internet_gateway.gw]
 }
 
 resource "aws_nat_gateway" "gw" {
@@ -119,7 +119,7 @@ resource "aws_security_group" "ecs_tasks" {
 
 resource "aws_alb" "main" {
   name            = "tf-ecs-chat"
-  subnets         = ["${aws_subnet.public.*.id}"]
+  subnets         = aws_subnet.public[*].id
   security_groups = ["${aws_security_group.lb.id}"]
 }
 
@@ -184,7 +184,7 @@ resource "aws_ecs_service" "main" {
 
   network_configuration {
     security_groups = ["${aws_security_group.ecs_tasks.id}"]
-    subnets         = ["${aws_subnet.private.*.id}"]
+    subnets         = aws_subnet.public[*].id
   }
 
   load_balancer {
@@ -194,6 +194,6 @@ resource "aws_ecs_service" "main" {
   }
 
   depends_on = [
-    "aws_alb_listener.front_end",
+    aws_alb_listener.front_end,
   ]
 }

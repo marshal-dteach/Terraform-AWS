@@ -34,7 +34,7 @@ locals {
 resource "aws_s3_bucket" "terraform_state" {
   # With account id, this S3 bucket names can be *globally* unique.
   bucket = "${local.account_id}-terraform-states"
-
+  force_destroy = true
   # Enable versioning so we can see the full revision history of our
   # state files
   versioning {

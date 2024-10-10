@@ -3,8 +3,15 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
+data "aws_caller_identity" "current" {}
+
+locals {
+  account_id = data.aws_caller_identity.current.account_id
+}
+
 variable "aws_account_id" {
   description = "AWS account ID"
+  default = "{locals.account_id}"
 }
 
 variable "az_count" {
