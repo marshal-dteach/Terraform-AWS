@@ -9,9 +9,10 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
 }
 
-variable "aws_account_id" {
-  description = "AWS account ID"
-  default = "{locals.account_id}"
+variable "environment" {
+  description = "Environment name"
+  type        = string
+  default     = "dev"
 }
 
 variable "az_count" {
