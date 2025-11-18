@@ -3,6 +3,12 @@
 # Fetch AZs in the current region
 data "aws_availability_zones" "available" {}
 
+# Get current AWS region
+data "aws_region" "current" {}
+
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}
+
 resource "aws_vpc" "main" {
   cidr_block = "172.0.0.0/16"
   
@@ -46,46 +52,46 @@ resource "aws_subnet" "public" {
 
 # IGW for the public subnet
 resource "aws_internet_gateway" "gw" {
-  vpc_id = "${aws_vpc.main.id}"
+  vpc_id = aws_vpc.main.id
 }
 
 # Route the public subnet traffic through the IGW
 resource "aws_route" "internet_access" {
-  route_table_id         = "${aws_vpc.main.main_route_table_id}"
+  route_table_id         = aws_vpc.main.main_route_table_id
   destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = "${aws_internet_gateway.gw.id}"
+  gateway_id             = aws_internet_gateway.gw.id
 }
 
 # Create a NAT gateway with an EIP for each private subnet to get internet connectivity
 resource "aws_eip" "gw" {
-  count      = "${var.az_count}"
-  domain        = "vpc"
+  count      = var.az_count
+  domain     = "vpc"
   depends_on = [aws_internet_gateway.gw]
 }
 
 resource "aws_nat_gateway" "gw" {
-  count         = "${var.az_count}"
-  subnet_id     = "${element(aws_subnet.public.*.id, count.index)}"
-  allocation_id = "${element(aws_eip.gw.*.id, count.index)}"
+  count         = var.az_count
+  subnet_id     = aws_subnet.public[count.index].id
+  allocation_id = aws_eip.gw[count.index].id
 }
 
 # Create a new route table for the private subnets
 # And make it route non-local traffic through the NAT gateway to the internet
 resource "aws_route_table" "private" {
-  count  = "${var.az_count}"
-  vpc_id = "${aws_vpc.main.id}"
+  count  = var.az_count
+  vpc_id = aws_vpc.main.id
 
   route {
-    cidr_block = "0.0.0.0/0"
-    nat_gateway_id = "${element(aws_nat_gateway.gw.*.id, count.index)}"
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.gw[count.index].id
   }
 }
 
 # Explicitely associate the newly created route tables to the private subnets (so they don't default to the main route table)
 resource "aws_route_table_association" "private" {
-  count          = "${var.az_count}"
-  subnet_id      = "${element(aws_subnet.private.*.id, count.index)}"
-  route_table_id = "${element(aws_route_table.private.*.id, count.index)}"
+  count          = var.az_count
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
 }
 
 ### Security
@@ -95,7 +101,7 @@ resource "aws_route_table_association" "private" {
 resource "aws_security_group" "lb" {
   name        = "tf-ecs-alb"
   description = "controls access to the ALB"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     protocol    = "tcp"
@@ -116,13 +122,13 @@ resource "aws_security_group" "lb" {
 resource "aws_security_group" "ecs_tasks" {
   name        = "tf-ecs-tasks"
   description = "allow inbound access from the ALB only"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     protocol        = "tcp"
-    from_port       = "${var.app_port}"
-    to_port         = "${var.app_port}"
-    security_groups = ["${aws_security_group.lb.id}"]
+    from_port       = var.app_port
+    to_port         = var.app_port
+    security_groups = [aws_security_group.lb.id]
   }
 
   egress {
@@ -133,13 +139,109 @@ resource "aws_security_group" "ecs_tasks" {
   }
 }
 
+### S3 Bucket for ALB Logs
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket = "${data.aws_caller_identity.current.account_id}-alb-logs-${var.environment}"
+
+  tags = {
+    Name        = "alb-logs"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    id     = "alb-logs-lifecycle"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+### CloudWatch Log Group
+
+resource "aws_cloudwatch_log_group" "ecs_tasks" {
+  name              = "/ecs/app-${var.environment}"
+  retention_in_days = 7
+
+  tags = {
+    Name        = "ecs-tasks-logs"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
+### Service Discovery
+
+resource "aws_service_discovery_private_dns_namespace" "main" {
+  name        = "ecs.local"
+  description = "Service discovery namespace for ECS"
+  vpc         = aws_vpc.main.id
+
+  tags = {
+    Name        = "ecs-service-discovery"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
+resource "aws_service_discovery_service" "main" {
+  name = "app"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.main.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_grace_period_seconds = 30
+
+  tags = {
+    Name        = "ecs-service-discovery-service"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
 ### ALB
 
-resource "aws_alb" "main" {
+resource "aws_lb" "main" {
   name            = "tf-ecs-${var.environment}"
   subnets         = aws_subnet.public[*].id
-  security_groups = ["${aws_security_group.lb.id}"]
-  
+  security_groups = [aws_security_group.lb.id]
+  internal        = false
+  load_balancer_type = "application"
+
   access_logs {
     bucket  = aws_s3_bucket.alb_logs.id
     prefix  = "alb-logs"
@@ -153,7 +255,7 @@ resource "aws_alb" "main" {
   }
 }
 
-resource "aws_alb_target_group" "app" {
+resource "aws_lb_target_group" "app" {
   name        = "tf-ecs-chat"
   port        = 80
   protocol    = "HTTP"
@@ -162,11 +264,11 @@ resource "aws_alb_target_group" "app" {
 
   health_check {
     healthy_threshold   = 2
-    interval           = 30
-    protocol           = "HTTP"
-    matcher            = "200"
-    timeout            = 5
-    path              = "/"
+    interval            = 30
+    protocol            = "HTTP"
+    matcher             = "200"
+    timeout             = 5
+    path                = "/"
     unhealthy_threshold = 10
   }
 
@@ -178,14 +280,14 @@ resource "aws_alb_target_group" "app" {
 }
 
 # Redirect all traffic from the ALB to the target group
-resource "aws_alb_listener" "front_end" {
-  load_balancer_arn = "${aws_alb.main.id}"
+resource "aws_lb_listener" "front_end" {
+  load_balancer_arn = aws_lb.main.id
   port              = "80"
   protocol          = "HTTP"
 
   default_action {
-    target_group_arn = "${aws_alb_target_group.app.id}"
-    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.id
+    type            = "forward"
   }
 }
 
@@ -227,15 +329,14 @@ resource "aws_ecs_task_definition" "app" {
 
   container_definitions = jsonencode([
     {
-      cpu              = var.fargate_cpu
-      image            = var.app_image
-      memory          = var.fargate_memory
-      name            = "app"
-      networkMode     = "awsvpc"
-      portMappings    = [
+      image   = var.app_image
+      name    = "app"
+      essential = true
+      portMappings = [
         {
           containerPort = var.app_port
           hostPort      = var.app_port
+          protocol      = "tcp"
         }
       ]
       logConfiguration = {
@@ -271,7 +372,7 @@ resource "aws_ecs_service" "main" {
   }
 
   load_balancer {
-    target_group_arn = aws_alb_target_group.app.id
+    target_group_arn = aws_lb_target_group.app.id
     container_name   = "app"
     container_port   = var.app_port
   }
@@ -281,6 +382,6 @@ resource "aws_ecs_service" "main" {
   }
 
   depends_on = [
-    aws_alb_listener.front_end,
+    aws_lb_listener.front_end,
   ]
 }

@@ -17,7 +17,8 @@ variable "environment" {
 
 variable "az_count" {
   description = "Number of AZs to cover in a given AWS region"
-  default     = "2"
+  type        = number
+  default     = 2
 }
 
 variable "app_image" {
@@ -37,10 +38,12 @@ variable "app_count" {
 
 variable "fargate_cpu" {
   description = "Fargate instance CPU units to provision (1 vCPU = 1024 CPU units)"
-  default     = "256"
+  type        = number
+  default     = 256
 }
 
 variable "fargate_memory" {
   description = "Fargate instance memory to provision (in MiB)"
-  default     = "512"
+  type        = number
+  default     = 512
 }
